@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Overleaf Assist Demo (Codex CLI)
 // @namespace    https://overleaf.com/
-// @version      0.3.0
+// @version      0.3.1
 // @description  Demo assistant UI for Overleaf with a local Codex CLI proxy backend.
 // @match        https://www.overleaf.com/*
 // @match        https://overleaf.com/*
@@ -20,6 +20,7 @@
   'use strict';
 
   const ASSIST_STORAGE_KEY = 'overleafAssistDemoConfig';
+  const SCRIPT_VERSION = '0.3.1';
   const DEFAULT_CONFIG = {
     proxyUrl: 'http://localhost:8787/assist',
     scope: 'auto',
@@ -47,7 +48,7 @@
   const ACTIVE_TAB_OPTIONS = ['chat', 'settings'];
   const ALLOWED_REASONING_EFFORTS = ['default', 'minimal', 'low', 'medium', 'high', 'xhigh'];
   const FALLBACK_REASONING_EFFORTS = ['default', 'low', 'medium', 'high', 'xhigh'];
-  const DEFAULT_MODEL_CONTEXT_LIMIT = 128000;
+  const DEFAULT_MODEL_CONTEXT_LIMIT = 1000000;
   const MODEL_CONTEXT_LIMITS = {
     'gpt-4.1': 128000,
     'gpt-5': 200000,
@@ -99,6 +100,9 @@
     },
     modelsMetaError: '',
     modelsUrl: '',
+    bridgeVersion: '',
+    versionMismatchMessage: '',
+    versionPromptedKey: '',
     hiddenForNoEditor: false,
     currentProjectId: '',
     currentSessionId: '',
@@ -925,6 +929,18 @@
       .ola-hidden {
         display: none !important;
       }
+      #ola-version-warning {
+        display: none;
+        margin-top: 8px;
+        padding: 8px 10px;
+        border: 1px solid #7f1d1d;
+        border-radius: 8px;
+        background: #2b1013;
+        color: #ffd7d7;
+      }
+      #ola-version-warning.show {
+        display: block;
+      }
       #ola-model-status.error {
         color: #b00020;
       }
@@ -982,6 +998,7 @@
             </div>
             <div class="ola-meta ola-meta-main">
               <div id="ola-model-status"></div>
+              <div id="ola-version-warning"></div>
               <div id="ola-usage">Estimated usage: -</div>
               <div class="ola-usage-bar">
                 <div id="ola-usage-fill"></div>
@@ -1137,6 +1154,7 @@
     const closeBtn = overlay.querySelector('#ola-close');
     const statusEl = overlay.querySelector('#ola-status');
     const modelStatusEl = overlay.querySelector('#ola-model-status');
+    const versionWarningEl = overlay.querySelector('#ola-version-warning');
     const usageEl = overlay.querySelector('#ola-usage');
     const usageFill = overlay.querySelector('#ola-usage-fill');
 
@@ -1179,6 +1197,47 @@
     function setModelStatus(text, isError) {
       modelStatusEl.textContent = text || '';
       modelStatusEl.classList.toggle('error', Boolean(isError));
+    }
+
+    function renderVersionWarning() {
+      versionWarningEl.textContent = state.versionMismatchMessage || '';
+      versionWarningEl.classList.toggle('show', Boolean(state.versionMismatchMessage));
+    }
+
+    function promptVersionMismatchIfNeeded() {
+      if (!state.versionMismatchMessage || !overlay.classList.contains('open')) {
+        return;
+      }
+      const promptKey = `${SCRIPT_VERSION}::${state.bridgeVersion || ''}`;
+      if (!promptKey || state.versionPromptedKey === promptKey) {
+        return;
+      }
+      state.versionPromptedKey = promptKey;
+      window.setTimeout(() => {
+        window.alert(
+          [
+            'Overleaf Assist version mismatch detected.',
+            '',
+            `Desktop bridge version: ${state.bridgeVersion || 'unknown'}`,
+            `Userscript version: ${SCRIPT_VERSION}`,
+            '',
+            'Please update the userscript to match the desktop app.',
+          ].join('\n')
+        );
+      }, 0);
+    }
+
+    function syncBridgeVersion(bridgeVersion) {
+      const nextBridgeVersion =
+        typeof bridgeVersion === 'string' && bridgeVersion.trim() ? bridgeVersion.trim() : '';
+      state.bridgeVersion = nextBridgeVersion;
+      if (nextBridgeVersion && nextBridgeVersion !== SCRIPT_VERSION) {
+        state.versionMismatchMessage = `Update the userscript: desktop bridge is v${nextBridgeVersion}, current script is v${SCRIPT_VERSION}.`;
+      } else {
+        state.versionMismatchMessage = '';
+      }
+      renderVersionWarning();
+      promptVersionMismatchIfNeeded();
     }
 
     function clearSessionReconnectTimer() {
@@ -2554,6 +2613,7 @@
         if (!health || health.ok !== true) {
           throw new Error('Bridge health probe failed');
         }
+        syncBridgeVersion(health.version);
 
         if (health.codex_ready !== true) {
           let detail = '';
@@ -2642,6 +2702,8 @@
       refreshReasoningEffortOptions();
       refreshApplyModeUI();
       setStatus('Checking local app...');
+      renderVersionWarning();
+      promptVersionMismatchIfNeeded();
       updateUsageUI();
       refreshContextSnapshot();
       refreshModelsMetadata(true);

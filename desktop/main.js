@@ -5,7 +5,6 @@ const fsSync = require('fs');
 const fs = require('fs/promises');
 const { spawn } = require('child_process');
 const { startBridge, stopBridge } = require('../proxy/bridge');
-const { TerminalManager } = require('./terminal-manager');
 
 const SERVICE_PORT = 8787;
 const INSTALL_DOCS_URL = 'https://platform.openai.com/docs/codex';
@@ -28,21 +27,6 @@ let diagnosticsState = {
   doctor: null,
   checked_at: 0,
 };
-const terminalManager = new TerminalManager({
-  cwd: os.homedir(),
-  getCommand: async () => ({
-    command:
-      bridgeState &&
-      bridgeState.config &&
-      typeof bridgeState.config.resolvedCodexBin === 'string' &&
-      bridgeState.config.resolvedCodexBin.trim()
-        ? bridgeState.config.resolvedCodexBin.trim()
-        : process.platform === 'win32'
-          ? 'codex.cmd'
-          : 'codex',
-    args: [],
-  }),
-});
 
 function firstExistingPath(paths) {
   for (const candidate of paths) {
@@ -222,16 +206,6 @@ function pushSessionUpdateToWindow(payload) {
     return;
   }
   mainWindow.webContents.send('session:update', payload || null);
-}
-
-function pushTerminalEventToWindow(type, payload) {
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    return;
-  }
-  mainWindow.webContents.send('terminal:event', {
-    type,
-    payload: payload || null,
-  });
 }
 
 function showStatusWindow() {
@@ -565,15 +539,28 @@ function getProjectSession(sessionId) {
     return null;
   }
   const session = bridgeState.controller.getSessionById(sessionId);
-  if (!session || typeof bridgeState.controller.buildSessionSnapshot !== 'function') {
+  if (!session) {
     return null;
   }
-  return bridgeState.controller.buildSessionSnapshot(session);
+  if (typeof bridgeState.controller.buildDesktopSessionDetail === 'function') {
+    return bridgeState.controller.buildDesktopSessionDetail(session);
+  }
+  if (typeof bridgeState.controller.buildSessionSnapshot === 'function') {
+    return bridgeState.controller.buildSessionSnapshot(session);
+  }
+  return null;
 }
 
-function registerTerminalEvents() {
-  terminalManager.onEvent((type, payload) => {
-    pushTerminalEventToWindow(type, payload);
+async function deleteProjectSession(sessionId) {
+  if (
+    !bridgeState ||
+    !bridgeState.controller ||
+    typeof bridgeState.controller.deleteSession !== 'function'
+  ) {
+    throw new Error('Bridge session controller unavailable');
+  }
+  return bridgeState.controller.deleteSession(sessionId, {
+    cancelActive: true,
   });
 }
 
@@ -605,17 +592,10 @@ function registerIpcHandlers() {
     ) {
       throw new Error('Bridge session controller unavailable');
     }
-    return bridgeState.controller.cancelSession(sessionId);
+    bridgeState.controller.cancelSession(sessionId);
+    return getProjectSession(sessionId);
   });
-  ipcMain.handle('terminal:getState', async () => terminalManager.getSnapshot());
-  ipcMain.handle('terminal:start', async () => terminalManager.start());
-  ipcMain.handle('terminal:restart', async () => terminalManager.restart());
-  ipcMain.handle('terminal:write', async (_event, data) => ({
-    ok: terminalManager.write(data),
-  }));
-  ipcMain.handle('terminal:resize', async (_event, size) => ({
-    ok: terminalManager.resize(size && size.cols, size && size.rows),
-  }));
+  ipcMain.handle('session:delete', async (_event, sessionId) => deleteProjectSession(sessionId));
 }
 
 const lock = app.requestSingleInstanceLock();
@@ -633,7 +613,6 @@ if (!lock) {
   app.whenReady().then(async () => {
     createMainWindow();
     createTray();
-    registerTerminalEvents();
     registerIpcHandlers();
     await configureAutoStart();
     await ensureBridgeStarted();
@@ -661,11 +640,6 @@ app.on('before-quit', async () => {
     healthPollTimer = null;
   }
   clearBridgeSessionSubscription();
-  try {
-    await terminalManager.stop();
-  } catch (err) {
-    // ignore terminal shutdown failures during app quit
-  }
   try {
     await stopBridge();
   } catch (err) {

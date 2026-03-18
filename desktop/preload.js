@@ -9,11 +9,7 @@ contextBridge.exposeInMainWorld('assistDesktop', {
   listSessions: () => ipcRenderer.invoke('session:list'),
   getSession: (sessionId) => ipcRenderer.invoke('session:get', sessionId),
   cancelSession: (sessionId) => ipcRenderer.invoke('session:cancel', sessionId),
-  getTerminalState: () => ipcRenderer.invoke('terminal:getState'),
-  startTerminal: () => ipcRenderer.invoke('terminal:start'),
-  restartTerminal: () => ipcRenderer.invoke('terminal:restart'),
-  writeTerminal: (data) => ipcRenderer.invoke('terminal:write', data),
-  resizeTerminal: (cols, rows) => ipcRenderer.invoke('terminal:resize', { cols, rows }),
+  deleteSession: (sessionId) => ipcRenderer.invoke('session:delete', sessionId),
   onDiagnostics: (callback) => {
     if (typeof callback !== 'function') {
       return () => {};
@@ -32,16 +28,6 @@ contextBridge.exposeInMainWorld('assistDesktop', {
     ipcRenderer.on('session:update', handler);
     return () => {
       ipcRenderer.removeListener('session:update', handler);
-    };
-  },
-  onTerminalEvent: (callback) => {
-    if (typeof callback !== 'function') {
-      return () => {};
-    }
-    const handler = (_event, payload) => callback(payload);
-    ipcRenderer.on('terminal:event', handler);
-    return () => {
-      ipcRenderer.removeListener('terminal:event', handler);
     };
   },
 });

@@ -12,16 +12,13 @@
   const sessionListEl = document.getElementById('session-list');
   const sessionMetaEl = document.getElementById('session-meta');
   const sessionLogEl = document.getElementById('session-log');
+  const sessionRawLogEl = document.getElementById('session-raw-log');
   const sessionCancelBtn = document.getElementById('session-cancel-btn');
+  const sessionDeleteBtn = document.getElementById('session-delete-btn');
   const sessionsRefreshBtn = document.getElementById('sessions-refresh-btn');
-  const terminalStartBtn = document.getElementById('terminal-start-btn');
-  const terminalRestartBtn = document.getElementById('terminal-restart-btn');
-  const terminalMetaEl = document.getElementById('terminal-meta');
-  const terminalContainerEl = document.getElementById('terminal-container');
   const tabButtons = Array.from(document.querySelectorAll('.tab-btn'));
   const tabPanels = {
     status: document.getElementById('panel-status'),
-    terminal: document.getElementById('panel-terminal'),
     sessions: document.getElementById('panel-sessions'),
   };
 
@@ -29,13 +26,11 @@
     diagnostics: null,
     sessions: [],
     selectedSessionId: '',
-    terminal: null,
-    fitAddon: null,
-    terminalSnapshot: null,
-    terminalInitialized: false,
-    terminalStartRequested: false,
+    selectedSessionDetail: null,
     activeTab: 'status',
-    terminalResizeTimer: null,
+    detailRefreshTimer: null,
+    detailRefreshInFlight: false,
+    sessionDeletePending: false,
   };
 
   function setText(node, value) {
@@ -149,23 +144,23 @@
     setText(tokenMetricsEl, lines.length > 0 ? lines.join('\n') : 'No token usage or quota data yet.');
   }
 
-  function renderDiagnostics(stateValue) {
-    state.diagnostics = stateValue || null;
-    const doctor = stateValue && stateValue.doctor && typeof stateValue.doctor === 'object'
-      ? stateValue.doctor
+  function renderDiagnostics(value) {
+    state.diagnostics = value || null;
+    const doctor = value && value.doctor && typeof value.doctor === 'object'
+      ? value.doctor
       : null;
-    const boolOrDash = (value) => (typeof value === 'boolean' ? String(value) : '-');
+    const boolOrDash = (boolValue) => (typeof boolValue === 'boolean' ? String(boolValue) : '-');
 
-    if (stateValue && stateValue.startup_error) {
-      setText(summaryEl, `Bridge startup error: ${stateValue.startup_error.message || 'Unknown error'}`);
+    if (value && value.startup_error) {
+      setText(summaryEl, `Bridge startup error: ${value.startup_error.message || 'Unknown error'}`);
       bridgeBadgeEl.textContent = 'Bridge error';
       bridgeBadgeEl.className = 'badge err';
-    } else if (stateValue && stateValue.health && stateValue.health.codex_ready) {
-      setText(summaryEl, `Bridge OK on localhost:${stateValue.health.port} (codex ready)`);
+    } else if (value && value.health && value.health.codex_ready) {
+      setText(summaryEl, `Bridge OK on localhost:${value.health.port} (codex ready)`);
       bridgeBadgeEl.textContent = 'Bridge ready';
       bridgeBadgeEl.className = 'badge ok';
-    } else if (stateValue && stateValue.health) {
-      setText(summaryEl, `Bridge running on localhost:${stateValue.health.port}, but Codex is not ready`);
+    } else if (value && value.health) {
+      setText(summaryEl, `Bridge running on localhost:${value.health.port}, but Codex is not ready`);
       bridgeBadgeEl.textContent = 'Codex not ready';
       bridgeBadgeEl.className = 'badge warn';
     } else {
@@ -189,9 +184,9 @@
         .join('\n')
     );
     renderIssues(doctor ? doctor.issues : undefined);
-    renderTokenMetrics(stateValue ? stateValue.health : null);
+    renderTokenMetrics(value ? value.health : null);
 
-    const checked = stateValue && stateValue.checked_at ? new Date(stateValue.checked_at).toLocaleString() : '-';
+    const checked = value && value.checked_at ? new Date(value.checked_at).toLocaleString() : '-';
     checkedAtEl.textContent = `Last checked: ${checked}`;
   }
 
@@ -201,6 +196,106 @@
 
   function findSession(sessionId) {
     return state.sessions.find((session) => session && session.session_id === sessionId) || null;
+  }
+
+  function mergeSessionSummaryIntoDetail(summary) {
+    if (
+      !summary ||
+      typeof summary !== 'object' ||
+      !state.selectedSessionDetail ||
+      state.selectedSessionDetail.session_id !== summary.session_id
+    ) {
+      return;
+    }
+    state.selectedSessionDetail = {
+      ...state.selectedSessionDetail,
+      status: summary.status,
+      status_message: summary.status_message,
+      updated_at: summary.updated_at,
+      active_run_id: summary.active_run_id,
+      session_usage: summary.session_usage,
+      last_seq: summary.last_seq,
+    };
+  }
+
+  function renderRawCliLog(rawCliLog) {
+    sessionRawLogEl.innerHTML = '';
+    const entries = Array.isArray(rawCliLog) ? rawCliLog : [];
+    if (entries.length === 0) {
+      sessionRawLogEl.innerHTML = '<div class="empty">No raw CLI output stored yet.</div>';
+      return;
+    }
+    for (const entry of entries) {
+      const line = document.createElement('div');
+      line.className = `session-raw-entry ${entry.stream === 'stderr' ? 'stderr' : 'stdout'}`;
+      const ts = entry.ts ? new Date(entry.ts).toLocaleTimeString() : '-';
+      line.innerHTML = `<small>${entry.stream || 'stdout'} | ${ts}</small>`;
+      const body = document.createElement('div');
+      body.className = 'mono';
+      body.textContent = entry.text || '';
+      line.appendChild(body);
+      sessionRawLogEl.appendChild(line);
+    }
+    sessionRawLogEl.scrollTop = sessionRawLogEl.scrollHeight;
+  }
+
+  function renderSessionDetail(detail) {
+    state.selectedSessionDetail = detail || null;
+    if (!detail) {
+      setText(sessionMetaEl, 'Select a session to inspect its shared transcript and raw CLI output.');
+      sessionLogEl.innerHTML = '<div class="empty">No session selected.</div>';
+      sessionRawLogEl.innerHTML = '<div class="empty">No session selected.</div>';
+      sessionCancelBtn.disabled = true;
+      sessionDeleteBtn.disabled = true;
+      return;
+    }
+
+    setText(
+      sessionMetaEl,
+      [
+        `project_id: ${detail.project_id || '-'}`,
+        `session_id: ${detail.session_id || '-'}`,
+        `status: ${detail.status || '-'}`,
+        `status_message: ${detail.status_message || '-'}`,
+        `active_run_id: ${detail.active_run_id || '-'}`,
+        `last_seq: ${detail.last_seq || 0}`,
+        `estimated_usage: in ${formatWholeNumber(detail.session_usage && detail.session_usage.estimated_input_tokens)} / out ${formatWholeNumber(detail.session_usage && detail.session_usage.estimated_output_tokens)} / total ${formatWholeNumber(detail.session_usage && detail.session_usage.estimated_total_tokens)}`,
+      ].join('\n')
+    );
+
+    sessionCancelBtn.disabled = detail.status !== 'running' || state.sessionDeletePending;
+    sessionDeleteBtn.disabled = state.sessionDeletePending;
+
+    sessionLogEl.innerHTML = '';
+    const turns = Array.isArray(detail.chat_turns) ? detail.chat_turns : [];
+    if (turns.length === 0) {
+      sessionLogEl.innerHTML = '<div class="empty">No transcript stored yet.</div>';
+    } else {
+      for (const turn of turns) {
+        const line = document.createElement('div');
+        line.className = `session-line ${turn.role || 'system'}`;
+        const ts = turn.ts ? new Date(turn.ts).toLocaleTimeString() : '-';
+        line.innerHTML = `<small>${turn.role || 'system'} | ${ts}</small>`;
+        const body = document.createElement('div');
+        body.className = 'mono';
+        body.textContent = turn.text || '';
+        line.appendChild(body);
+        sessionLogEl.appendChild(line);
+      }
+      sessionLogEl.scrollTop = sessionLogEl.scrollHeight;
+    }
+
+    renderRawCliLog(detail.raw_cli_log);
+  }
+
+  function ensureSelectedSessionId() {
+    if (state.sessions.length === 0) {
+      state.selectedSessionId = '';
+      return;
+    }
+    if (!state.selectedSessionId || !findSession(state.selectedSessionId)) {
+      state.selectedSessionId = state.sessions[0].session_id;
+    }
   }
 
   function renderSessionList() {
@@ -213,9 +308,8 @@
       renderSessionDetail(null);
       return;
     }
-    if (!state.selectedSessionId || !findSession(state.selectedSessionId)) {
-      state.selectedSessionId = state.sessions[0].session_id;
-    }
+
+    ensureSelectedSessionId();
 
     for (const session of state.sessions) {
       const button = document.createElement('button');
@@ -226,55 +320,15 @@
         <div class="meta">${session.status} | updated ${session.updated_at ? new Date(session.updated_at).toLocaleTimeString() : '-'}</div>
       `;
       button.addEventListener('click', () => {
+        if (state.selectedSessionId === session.session_id) {
+          return;
+        }
         state.selectedSessionId = session.session_id;
         renderSessionList();
+        loadSessionDetail(state.selectedSessionId);
       });
       sessionListEl.appendChild(button);
     }
-
-    renderSessionDetail(findSession(state.selectedSessionId));
-  }
-
-  function renderSessionDetail(session) {
-    if (!session) {
-      setText(sessionMetaEl, 'Select a session to inspect its shared transcript and latest result.');
-      sessionLogEl.innerHTML = '<div class="empty">No session selected.</div>';
-      sessionCancelBtn.disabled = true;
-      return;
-    }
-
-    setText(
-      sessionMetaEl,
-      [
-        `project_id: ${session.project_id || '-'}`,
-        `session_id: ${session.session_id || '-'}`,
-        `status: ${session.status || '-'}`,
-        `status_message: ${session.status_message || '-'}`,
-        `active_run_id: ${session.active_run_id || '-'}`,
-        `last_seq: ${session.last_seq || 0}`,
-        `estimated_usage: in ${formatWholeNumber(session.session_usage && session.session_usage.estimated_input_tokens)} / out ${formatWholeNumber(session.session_usage && session.session_usage.estimated_output_tokens)} / total ${formatWholeNumber(session.session_usage && session.session_usage.estimated_total_tokens)}`,
-      ].join('\n')
-    );
-
-    sessionCancelBtn.disabled = session.status !== 'running';
-    sessionLogEl.innerHTML = '';
-    const turns = Array.isArray(session.chat_turns) ? session.chat_turns : [];
-    if (turns.length === 0) {
-      sessionLogEl.innerHTML = '<div class="empty">No transcript stored yet.</div>';
-      return;
-    }
-    for (const turn of turns) {
-      const line = document.createElement('div');
-      line.className = `session-line ${turn.role || 'system'}`;
-      const ts = turn.ts ? new Date(turn.ts).toLocaleTimeString() : '-';
-      line.innerHTML = `<small>${turn.role || 'system'} | ${ts}</small>`;
-      const body = document.createElement('div');
-      body.className = 'mono';
-      body.textContent = turn.text || '';
-      line.appendChild(body);
-      sessionLogEl.appendChild(line);
-    }
-    sessionLogEl.scrollTop = sessionLogEl.scrollHeight;
   }
 
   function upsertSession(session) {
@@ -287,124 +341,109 @@
     renderSessionList();
   }
 
+  function removeSession(sessionId) {
+    if (!sessionId) {
+      return;
+    }
+    state.sessions = state.sessions.filter((item) => item.session_id !== sessionId);
+    if (state.selectedSessionId === sessionId) {
+      state.selectedSessionId = '';
+      state.selectedSessionDetail = null;
+    }
+    renderSessionList();
+    if (state.sessions.length > 0 && !state.selectedSessionDetail) {
+      ensureSelectedSessionId();
+      renderSessionList();
+      loadSessionDetail(state.selectedSessionId);
+    }
+  }
+
+  async function loadSessionDetail(sessionId) {
+    if (!sessionId) {
+      renderSessionDetail(null);
+      return;
+    }
+    try {
+      const detail = await window.assistDesktop.getSession(sessionId);
+      if (!detail) {
+        removeSession(sessionId);
+        return;
+      }
+      if (state.selectedSessionId !== sessionId) {
+        return;
+      }
+      renderSessionDetail(detail);
+    } catch (err) {
+      if (state.selectedSessionId === sessionId) {
+        setText(sessionMetaEl, `Failed to load session detail: ${err.message || 'Unknown error'}`);
+      }
+    }
+  }
+
+  function scheduleSelectedSessionDetailRefresh() {
+    if (!state.selectedSessionId || state.detailRefreshInFlight) {
+      return;
+    }
+    if (state.detailRefreshTimer) {
+      clearTimeout(state.detailRefreshTimer);
+    }
+    state.detailRefreshTimer = setTimeout(async () => {
+      if (!state.selectedSessionId) {
+        return;
+      }
+      state.detailRefreshInFlight = true;
+      try {
+        await loadSessionDetail(state.selectedSessionId);
+      } finally {
+        state.detailRefreshInFlight = false;
+      }
+    }, 40);
+  }
+
   async function refreshSessions() {
     try {
       const sessions = await window.assistDesktop.listSessions();
       state.sessions = Array.isArray(sessions) ? sortSessions(sessions) : [];
       renderSessionList();
+      if (state.sessions.length > 0) {
+        ensureSelectedSessionId();
+        renderSessionList();
+        await loadSessionDetail(state.selectedSessionId);
+      } else {
+        renderSessionDetail(null);
+      }
     } catch (err) {
       sessionListEl.innerHTML = `<div class="empty">Failed to load sessions: ${err.message || 'Unknown error'}</div>`;
+      renderSessionDetail(null);
     }
   }
 
-  function ensureTerminal() {
-    if (state.terminalInitialized) {
-      return true;
-    }
-    const TerminalCtor = window.Terminal;
-    const FitAddonCtor =
-      window.FitAddon && typeof window.FitAddon.FitAddon === 'function'
-        ? window.FitAddon.FitAddon
-        : null;
-    if (typeof TerminalCtor !== 'function' || typeof FitAddonCtor !== 'function') {
-      terminalContainerEl.textContent = 'xterm.js assets failed to load.';
-      return false;
-    }
-    const term = new TerminalCtor({
-      cursorBlink: true,
-      fontFamily: '"Consolas", "Menlo", monospace',
-      fontSize: 13,
-      theme: {
-        background: '#03080d',
-        foreground: '#d8e7f8',
-        cursor: '#5ec2ff',
-        selectionBackground: 'rgba(94, 194, 255, 0.28)',
-      },
-    });
-    const fitAddon = new FitAddonCtor();
-    term.loadAddon(fitAddon);
-    term.open(terminalContainerEl);
-    term.onData((data) => {
-      window.assistDesktop.writeTerminal(data);
-    });
-    state.terminal = term;
-    state.fitAddon = fitAddon;
-    state.terminalInitialized = true;
-    applyTerminalSnapshot(state.terminalSnapshot, true);
-    scheduleTerminalResize();
-    return true;
-  }
-
-  function renderTerminalMeta(snapshot) {
-    const value = snapshot && typeof snapshot === 'object' ? snapshot : {};
-    terminalMetaEl.innerHTML = [
-      `available: ${String(Boolean(value.available))}`,
-      `running: ${String(Boolean(value.running))}`,
-      `pid: ${value.pid === null || value.pid === undefined ? '-' : String(value.pid)}`,
-      `started_at: ${value.started_at ? new Date(value.started_at).toLocaleString() : '-'}`,
-      `exit_code: ${value.exit_code === null || value.exit_code === undefined ? '-' : String(value.exit_code)}`,
-      value.error ? `error: ${value.error}` : '',
-    ]
-      .filter(Boolean)
-      .map((line) => `<span>${line}</span>`)
-      .join('');
-    terminalStartBtn.disabled = Boolean(value.running);
-    terminalRestartBtn.disabled = !Boolean(value.available);
-  }
-
-  function applyTerminalSnapshot(snapshot, resetBuffer) {
-    state.terminalSnapshot = snapshot && typeof snapshot === 'object' ? snapshot : null;
-    renderTerminalMeta(state.terminalSnapshot);
-    if (!ensureTerminal()) {
+  function appendRawCliEntry(rawCliEntry) {
+    if (
+      !rawCliEntry ||
+      typeof rawCliEntry !== 'object' ||
+      !state.selectedSessionDetail ||
+      state.selectedSessionDetail.session_id !== state.selectedSessionId
+    ) {
       return;
     }
-    if (resetBuffer) {
-      state.terminal.reset();
-      const buffer =
-        state.terminalSnapshot && typeof state.terminalSnapshot.buffer === 'string'
-          ? state.terminalSnapshot.buffer
-          : '';
-      if (buffer) {
-        state.terminal.write(buffer);
-      }
-    }
-  }
-
-  function scheduleTerminalResize() {
-    if (!state.terminalInitialized || state.activeTab !== 'terminal') {
+    const currentEntries = Array.isArray(state.selectedSessionDetail.raw_cli_log)
+      ? state.selectedSessionDetail.raw_cli_log
+      : [];
+    const nextSeq = Number.isFinite(Number(rawCliEntry.seq))
+      ? Math.max(0, Math.floor(Number(rawCliEntry.seq)))
+      : 0;
+    const lastSeq = currentEntries.length > 0
+      ? Number(currentEntries[currentEntries.length - 1].seq || 0)
+      : 0;
+    if (nextSeq > 0 && nextSeq <= lastSeq) {
       return;
     }
-    if (state.terminalResizeTimer) {
-      clearTimeout(state.terminalResizeTimer);
-    }
-    state.terminalResizeTimer = setTimeout(() => {
-      if (!state.fitAddon || !state.terminal) {
-        return;
-      }
-      try {
-        state.fitAddon.fit();
-        window.assistDesktop.resizeTerminal(state.terminal.cols, state.terminal.rows);
-      } catch (err) {
-        // ignore xterm fit failures during layout changes
-      }
-    }, 30);
-  }
-
-  async function ensureTerminalStarted() {
-    if (state.terminalStartRequested) {
-      return;
-    }
-    state.terminalStartRequested = true;
-    try {
-      const snapshot = await window.assistDesktop.startTerminal();
-      applyTerminalSnapshot(snapshot, true);
-    } catch (err) {
-      renderTerminalMeta({
-        available: false,
-        running: false,
-        error: err.message || 'Failed to start terminal',
-      });
-    }
+    state.selectedSessionDetail = {
+      ...state.selectedSessionDetail,
+      raw_cli_log: [...currentEntries, rawCliEntry],
+    };
+    renderRawCliLog(state.selectedSessionDetail.raw_cli_log);
   }
 
   function activateTab(tabName) {
@@ -415,15 +454,6 @@
     for (const [key, panel] of Object.entries(tabPanels)) {
       panel.classList.toggle('is-active', key === tabName);
     }
-    if (tabName === 'terminal') {
-      ensureTerminalStarted();
-      scheduleTerminalResize();
-    }
-  }
-
-  async function refreshDiagnostics() {
-    const diagnostics = await window.assistDesktop.getDiagnostics();
-    renderDiagnostics(diagnostics);
   }
 
   retryBtn.addEventListener('click', async () => {
@@ -454,40 +484,48 @@
       return;
     }
     try {
-      const snapshot = await window.assistDesktop.cancelSession(state.selectedSessionId);
-      upsertSession(snapshot);
+      const detail = await window.assistDesktop.cancelSession(state.selectedSessionId);
+      if (detail) {
+        upsertSession(detail);
+        if (state.selectedSessionId === detail.session_id) {
+          renderSessionDetail(detail);
+        }
+      } else {
+        await loadSessionDetail(state.selectedSessionId);
+      }
     } catch (err) {
       setText(sessionMetaEl, `Failed to cancel session: ${err.message || 'Unknown error'}`);
     }
   });
 
-  terminalStartBtn.addEventListener('click', async () => {
-    try {
-      const snapshot = await window.assistDesktop.startTerminal();
-      state.terminalStartRequested = true;
-      applyTerminalSnapshot(snapshot, true);
-      activateTab('terminal');
-    } catch (err) {
-      renderTerminalMeta({
-        available: false,
-        running: false,
-        error: err.message || 'Failed to start terminal',
-      });
+  sessionDeleteBtn.addEventListener('click', async () => {
+    if (!state.selectedSessionId) {
+      return;
     }
-  });
+    const detail = state.selectedSessionDetail;
+    const projectLabel = detail && detail.project_id ? detail.project_id : state.selectedSessionId;
+    const runningNote = detail && detail.status === 'running'
+      ? '\n\nThis will stop the active run and then delete the stored session.'
+      : '';
+    const confirmed = window.confirm(
+      `Delete stored session for ${projectLabel}?${runningNote}`
+    );
+    if (!confirmed) {
+      return;
+    }
 
-  terminalRestartBtn.addEventListener('click', async () => {
+    state.sessionDeletePending = true;
+    renderSessionDetail(state.selectedSessionDetail);
     try {
-      const snapshot = await window.assistDesktop.restartTerminal();
-      state.terminalStartRequested = true;
-      applyTerminalSnapshot(snapshot, true);
-      activateTab('terminal');
+      const result = await window.assistDesktop.deleteSession(state.selectedSessionId);
+      removeSession(result && result.session_id ? result.session_id : state.selectedSessionId);
     } catch (err) {
-      renderTerminalMeta({
-        available: false,
-        running: false,
-        error: err.message || 'Failed to restart terminal',
-      });
+      setText(sessionMetaEl, `Failed to delete session: ${err.message || 'Unknown error'}`);
+    } finally {
+      state.sessionDeletePending = false;
+      if (state.selectedSessionDetail) {
+        renderSessionDetail(state.selectedSessionDetail);
+      }
     }
   });
 
@@ -497,56 +535,57 @@
     });
   }
 
-  window.addEventListener('resize', () => {
-    scheduleTerminalResize();
-  });
-
   window.assistDesktop.onDiagnostics((payload) => {
     renderDiagnostics(payload);
   });
 
   window.assistDesktop.onSessionUpdate((payload) => {
-    if (payload && payload.session) {
-      upsertSession(payload.session);
+    if (!payload || typeof payload !== 'object') {
+      refreshSessions();
       return;
     }
-    refreshSessions();
-  });
 
-  window.assistDesktop.onTerminalEvent((message) => {
-    if (!message || typeof message !== 'object') {
+    if (payload.deleted) {
+      removeSession(payload.session_id || '');
       return;
     }
-    if (message.type === 'data') {
-      if (ensureTerminal()) {
-        state.terminal.write(typeof message.payload === 'string' ? message.payload : '');
+
+    if (payload.session) {
+      upsertSession(payload.session);
+      if (payload.session.session_id === state.selectedSessionId) {
+        mergeSessionSummaryIntoDetail(payload.session);
+        if (payload.raw_cli_entry) {
+          appendRawCliEntry(payload.raw_cli_entry);
+        } else {
+          scheduleSelectedSessionDetailRefresh();
+        }
       }
       return;
     }
-    if (message.type === 'reset') {
-      applyTerminalSnapshot(message.payload, true);
-      return;
-    }
-    if (message.type === 'state' || message.type === 'exit') {
-      applyTerminalSnapshot(message.payload, false);
-      return;
-    }
+
+    refreshSessions();
   });
 
   (async () => {
     try {
-      const [diagnostics, sessions, terminalSnapshot] = await Promise.all([
+      const [diagnostics, sessions] = await Promise.all([
         window.assistDesktop.getDiagnostics(),
         window.assistDesktop.listSessions(),
-        window.assistDesktop.getTerminalState(),
       ]);
       renderDiagnostics(diagnostics);
       state.sessions = Array.isArray(sessions) ? sortSessions(sessions) : [];
       renderSessionList();
-      applyTerminalSnapshot(terminalSnapshot, true);
+      if (state.sessions.length > 0) {
+        ensureSelectedSessionId();
+        renderSessionList();
+        await loadSessionDetail(state.selectedSessionId);
+      } else {
+        renderSessionDetail(null);
+      }
     } catch (err) {
       renderDiagnostics(null);
       sessionListEl.innerHTML = `<div class="empty">Failed to initialize desktop UI: ${err.message || 'Unknown error'}</div>`;
+      renderSessionDetail(null);
     }
   })();
 })();

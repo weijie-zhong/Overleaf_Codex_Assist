@@ -4,7 +4,6 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Overleaf Assist Desktop</title>
-    <link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css" />
     <style>
       :root {
         color-scheme: dark;
@@ -189,6 +188,11 @@
         background: rgba(15, 28, 42, 0.9);
       }
 
+      button.danger {
+        border-color: rgba(252, 165, 165, 0.35);
+        background: rgba(127, 29, 29, 0.26);
+      }
+
       button:disabled {
         opacity: 0.55;
         cursor: default;
@@ -236,14 +240,24 @@
         color: var(--muted);
       }
 
-      .session-log {
-        max-height: calc(100vh - 360px);
+      .session-detail-stack {
+        display: grid;
+        gap: 14px;
+      }
+
+      .session-scroll {
+        max-height: calc(50vh - 80px);
         overflow: auto;
         padding-right: 4px;
       }
 
-      .session-line {
-        margin-bottom: 8px;
+      .session-log {
+        display: grid;
+        gap: 8px;
+      }
+
+      .session-line,
+      .session-raw-entry {
         padding: 8px 10px;
         border-radius: 10px;
         background: rgba(8, 17, 26, 0.72);
@@ -261,33 +275,19 @@
         border-left: 3px solid #fde68a;
       }
 
-      .session-line small {
+      .session-raw-entry.stdout {
+        border-left: 3px solid rgba(94, 194, 255, 0.8);
+      }
+
+      .session-raw-entry.stderr {
+        border-left: 3px solid rgba(252, 165, 165, 0.9);
+      }
+
+      .session-line small,
+      .session-raw-entry small {
         display: block;
         color: var(--muted);
         margin-bottom: 4px;
-      }
-
-      .terminal-shell {
-        display: grid;
-        grid-template-rows: auto auto 1fr;
-        gap: 12px;
-        min-height: calc(100vh - 220px);
-      }
-
-      .terminal-meta {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
-        color: var(--muted);
-      }
-
-      #terminal-container {
-        min-height: 0;
-        border: 1px solid rgba(39, 65, 94, 0.75);
-        border-radius: 14px;
-        overflow: hidden;
-        background: #03080d;
-        padding: 10px;
       }
 
       @media (max-width: 980px) {
@@ -297,12 +297,8 @@
         }
 
         .session-list,
-        .session-log {
+        .session-scroll {
           max-height: none;
-        }
-
-        .terminal-shell {
-          min-height: 560px;
         }
       }
     </style>
@@ -312,17 +308,16 @@
       <header class="topbar">
         <div class="brand">
           <h1>Overleaf Assist</h1>
-          <p>Persistent local bridge, terminal, and project session monitor.</p>
+          <p>Persistent local bridge and project session monitor.</p>
         </div>
         <div class="top-meta">
-          <span id="bridge-badge" class="badge">Checking bridge…</span>
+          <span id="bridge-badge" class="badge">Checking bridge...</span>
           <span id="checked-at">Last checked: -</span>
         </div>
       </header>
 
       <nav class="tabs" aria-label="Desktop sections">
         <button class="tab-btn is-active" data-tab="status">Status</button>
-        <button class="tab-btn" data-tab="terminal">Codex Terminal</button>
         <button class="tab-btn" data-tab="sessions">Project Sessions</button>
       </nav>
 
@@ -360,17 +355,6 @@
           </div>
         </section>
 
-        <section id="panel-terminal" class="panel">
-          <div class="panel-inner terminal-shell">
-            <div class="actions">
-              <button id="terminal-start-btn">Start Terminal</button>
-              <button id="terminal-restart-btn" class="secondary">Restart Terminal</button>
-            </div>
-            <div id="terminal-meta" class="terminal-meta"></div>
-            <div id="terminal-container"></div>
-          </div>
-        </section>
-
         <section id="panel-sessions" class="panel">
           <div class="panel-inner">
             <div class="grid sessions">
@@ -386,8 +370,18 @@
                 <div id="session-meta" class="mono"></div>
                 <div class="actions" style="margin: 12px 0;">
                   <button id="session-cancel-btn" class="secondary">Cancel Active Run</button>
+                  <button id="session-delete-btn" class="danger">Delete Session</button>
                 </div>
-                <div id="session-log" class="session-log"></div>
+                <div class="session-detail-stack">
+                  <div>
+                    <h3>Shared Transcript</h3>
+                    <div id="session-log" class="session-log session-scroll"></div>
+                  </div>
+                  <div>
+                    <h3>Raw Codex CLI</h3>
+                    <div id="session-raw-log" class="session-log session-scroll"></div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -395,8 +389,6 @@
       </main>
     </div>
 
-    <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
-    <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
     <script src="./renderer.js"></script>
   </body>
 </html>

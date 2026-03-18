@@ -1,134 +1,206 @@
 # Overleaf Assist Demo
 
-This demo includes:
-- A Tampermonkey userscript: `overleaf-assist-demo.user.js`
-- A local bridge service that invokes your installed Codex CLI:
-  - Desktop app host: `desktop/main.js` (Electron, tray + auto-start)
-  - Manual fallback server: `proxy/server.js` (Node + Express)
+Overleaf Assist connects Overleaf to your local Codex CLI through a small desktop app and browser userscript. It lets you prompt Codex from inside Overleaf, restore prior results when you reopen a project, and review shared project sessions from the desktop app.
 
-## Quick start (desktop app, recommended)
+![Overleaf Assist demo](Demo.gif)
+
+## What This App Includes
+
+- `overleaf-assist-demo.user.js`: the Tampermonkey userscript injected into Overleaf
+- `desktop/main.js`: the Electron desktop host with tray controls, diagnostics, and session management
+- `proxy/server.js`: the local bridge entrypoint used by the desktop app
+
+## Quick Start
+
+This is the recommended setup for normal use.
+
 1. Install Tampermonkey in your browser.
-2. Create a new userscript and paste `overleaf-assist-demo.user.js`.
-3. Install and run the desktop host:
-   1. `npm install`
-   2. `npm run start:desktop`
-4. Ensure Codex CLI is installed and logged in:
-   1. `codex --version`
-   2. `codex login`
-   3. On Windows PowerShell with script-policy restrictions, use `codex.cmd` instead of `codex`.
-5. Open Overleaf. The assistant panel now opens by default.
-6. Press `Ctrl+Alt+Shift+A` to toggle the panel open/closed.
+2. Create a new userscript and paste in `overleaf-assist-demo.user.js`.
+3. Install and launch the desktop app.
+   - If you already have a packaged release, install the `.exe` from `dist/`.
+   - If you are running from source, use the instructions in `Running From Source` below.
+4. Make sure Codex CLI is installed and logged in.
+   - `codex --version`
+   - `codex login`
+   - On Windows PowerShell with script-policy restrictions, use `codex.cmd` instead of `codex`.
+5. Open an Overleaf project.
+6. Open the assistant panel.
+   - It should appear automatically.
+   - If needed, toggle it with `Ctrl+Alt+Shift+A`.
+7. Type a prompt and send it.
+8. Review the answer in the Overleaf panel, then apply edits with your chosen apply mode.
+
+## How To Use The App
+
+### In Overleaf
+
+1. Open the assistant panel from any Overleaf project.
+2. Optionally select text in the editor if you want Codex to focus on a specific region.
+3. Enter a prompt such as:
+   - explain this section
+   - rewrite the abstract
+   - fix the LaTeX in the selected theorem
+   - shorten this paragraph while preserving citations
+4. Choose an apply mode:
+   - `Smart Replace`: safest default for structured edits
+   - `Replace`: replace the current selection or whole document target
+   - `Insert`: insert generated content at the cursor
+   - `Copy`: copy the answer without editing the document
+5. If the userscript shows a version mismatch warning, update the userscript so it matches the desktop app version.
+
+### In The Desktop App
+
+The desktop app has two main views:
+
+- `Status`
+  - Shows bridge health, Codex install/login state, and token/quota diagnostics.
+- `Project Sessions`
+  - Lists stored sessions by Overleaf project.
+  - Shows the normalized transcript for the selected session.
+  - Shows the raw Codex CLI stdout/stderr log captured for that session.
+  - Lets you cancel an active run.
+  - Lets you delete a stored session. If a session is deleted, the web client will create a new one the next time that project starts a run.
+
+## How Sessions Work
+
+- Sessions are keyed by Overleaf project.
+- Different Overleaf projects can run at the same time.
+- Two tabs opened on the same Overleaf project attach to the same shared project session.
+- If you close and reopen the browser tab, the web client reloads the stored session from the bridge while the desktop app is still running.
+- Session retention is in memory only. Restarting the desktop app clears stored sessions.
+- Deleting a session from the desktop app removes the stored transcript/result/raw log for that project.
+
+## Running From Source
 
 Requires Node.js 18+.
 
-## Persistent run (method 1: packaged desktop app)
-Use this when you want the bridge to keep running across logins/reboots.
+### Desktop App
 
-1. Build a packaged app:
-   1. Windows: `npm run dist:win`
-   2. macOS: `npm run dist:mac`
-   3. Linux: `npm run dist:linux`
-2. Install the built app from the generated artifact in `dist/`.
-3. Launch it once after install.
-4. The app will auto-start on login when packaged (Windows/macOS login item; Linux autostart entry).
+1. `npm install`
+2. `npm run start:desktop`
+3. Open Overleaf and use the userscript panel.
 
-## Manual fallback (legacy local server)
+### Manual Bridge Fallback
+
+This is the older bridge-only workflow and is mostly useful for debugging.
+
 1. `cd proxy`
 2. `npm install`
 3. `npm start`
 
-## Notes
+## Bridge Notes
+
 - Default proxy URL: `http://localhost:8787/assist`
-- The bridge runs `codex exec` per request and returns the last assistant message.
-- Live feedback endpoint: `POST /assist-stream` (NDJSON events for run start/progress/summary/result/error).
-- Model metadata endpoint: `GET /models` (used by UI for model + reasoning options).
-- Health endpoint: `GET /health`
-  - Includes `token_metrics` from latest streamed Codex run (usage + quota snapshot when available).
-- Diagnostics endpoint: `GET /doctor`
-- The assistant uses selection when available; otherwise it uses the full document.
-- Apply modes: Smart Replace (default), Replace, Insert, Copy.
 - Browser code cannot execute local CLI binaries directly, so a local bridge is required.
-- The UI is a persistent terminal-style workspace (not a modal popup) with:
-  - Dock-right (default), Floating, and Bottom-console layouts.
-  - Chat transcript + message composer.
-  - Content snapshot pane showing what will be sent.
-  - Estimated token usage and model limit bar.
-  - Auto-hide when no active Overleaf editor is available.
-- Reasoning effort options are model-dependent when metadata is available.
-- If model metadata cannot be loaded, the UI falls back to custom model entry + fixed reasoning options.
-- Live progress in the userscript is a safe summary by default (stage updates + usage summary, not raw internal traces).
-- Timeout is configurable in UI settings (`Timeout (s)`); leave empty to use bridge default `CODEX_TIMEOUT_MS`.
+- The desktop app starts a local bridge on `localhost:8787`.
+- The bridge uses per-project sessions so runs can continue after the browser window is closed.
+- The userscript restores prior transcript/output for the current Overleaf project when available.
+- Live progress shown in the userscript is a safe summary by default, not the raw CLI trace.
 
-## Smart Replace (Default)
-- Smart Replace supports both chat and edits:
-  - Chat/explanations can be plain text.
-  - When edits are requested, Codex should return structured edit blocks, and only matched ranges are applied.
-- Required response contract:
-  - Start: `<<<OVERLEAF_EDIT_BLOCKS>>>`
-  - Per block:
-    - `<<<SEARCH>>>`
-    - exact source snippet
-    - `<<<REPLACE>>>`
-    - replacement snippet (can be empty for deletion)
-  - End: `<<<END_OVERLEAF_EDIT_BLOCKS>>>`
-- The UI builds a replace plan:
-  - `resolved`: one exact match
-  - `ambiguous`: multiple matches (you must pick a candidate)
-  - `missing`: no match
-- Smart Replace blocks changes when enabled items are unresolved or overlapping.
-- `Use Legacy Replace` switches to classic full selection/document replace explicitly.
+## Smart Replace
 
-## Desktop app behavior
-- Starts a local bridge on `localhost:8787`.
+`Smart Replace` is the default apply mode for document edits.
+
+- Chat and explanation responses can be plain text.
+- Structured edit responses use explicit search/replace blocks so the UI can match exact regions before editing.
+
+Required response contract:
+
+- Start marker: `<<<OVERLEAF_EDIT_BLOCKS>>>`
+- Per block:
+  - `<<<SEARCH>>>`
+  - exact source snippet
+  - `<<<REPLACE>>>`
+  - replacement snippet, which can be empty for deletion
+- End marker: `<<<END_OVERLEAF_EDIT_BLOCKS>>>`
+
+The UI builds a replace plan with these states:
+
+- `resolved`: one exact match
+- `ambiguous`: multiple matches and you must choose one
+- `missing`: no exact match was found
+
+Smart Replace blocks application when enabled edits are unresolved or overlapping. `Use Legacy Replace` switches back to classic whole-target replace behavior.
+
+## Desktop App Behavior
+
+- Starts and monitors the local bridge.
 - Exposes tray actions:
   - Open Status
   - Restart Bridge
   - Run Codex Login
   - Quit
+- Keeps a persistent desktop window once opened manually.
+- Shows bridge diagnostics and project sessions.
 - Auto-start configuration:
-  - Windows/macOS: login item enabled when packaged.
-  - Linux: autostart desktop entry is created when packaged.
-- Diagnostics window provides:
-  - Codex install/login/network checks
-  - Latest token usage and quota snapshot (from Codex `token_count` events when available)
-  - Actionable issue codes (`codex_missing`, `codex_not_logged_in`, `network_blocked`, `port_in_use`)
-- Tray tooltip shows readiness plus compact token usage/quota when available.
+  - Windows/macOS: login item enabled when packaged
+  - Linux: autostart desktop entry created when packaged
 
-## Environment variables
+Diagnostics include:
+
+- Codex install/login/network checks
+- Latest token usage and quota snapshot when available
+- Actionable issue codes such as `codex_missing`, `codex_not_logged_in`, `network_blocked`, and `port_in_use`
+
+## Bridge API
+
+Primary endpoints used by the app:
+
+- `GET /health`
+- `GET /doctor`
+- `GET /models`
+- `GET /session/project/:projectId`
+- `POST /session/project/:projectId/run`
+- `GET /session/:sessionId/events?after=<seq>`
+- `POST /session/:sessionId/cancel`
+
+Legacy/direct streaming endpoint:
+
+- `POST /assist-stream`
+
+## Environment Variables
+
 - `BRIDGE_PORT` (optional): defaults to `8787` for `npm run start:bridge`
 - `CODEX_BIN` (optional): Codex CLI executable (`codex` or `codex.cmd`)
 - `CODEX_MODEL` (optional): default model passed to `codex exec --model`
 - `CODEX_SANDBOX` (optional): defaults to `read-only`
 - `CODEX_TIMEOUT_MS` (optional): defaults to `180000`
-- `CODEX_HOME` (optional): set to a writable directory if Codex reports `failed to install system skills` / `Access is denied`
+- `CODEX_HOME` (optional): set to a writable directory if Codex reports `failed to install system skills` or `Access is denied`
 
-## Model and Reasoning Controls
-- The userscript loads model metadata from `GET /models` derived from your proxy URL.
+## Model And Reasoning Controls
+
+- The userscript loads model metadata from `GET /models`.
 - Model selection supports:
-  - Preset model dropdown (from local Codex metadata).
-  - Custom model text input fallback.
+  - preset model dropdown from local Codex metadata
+  - custom model text input fallback
 - Reasoning effort supports:
   - `Use Codex Default`
-  - Model-supported values (`minimal`, `low`, `medium`, `high`, `xhigh`, depending on model).
+  - model-supported values such as `minimal`, `low`, `medium`, `high`, and `xhigh`
+- Unknown/custom models fall back to a `1,000,000` token context limit in the UI.
 - `/assist` accepts optional `reasoning_effort`:
   - `default`, `minimal`, `low`, `medium`, `high`, `xhigh`
 - `/assist` and `/assist-stream` accept optional `timeout_ms`:
   - positive integer in milliseconds
-  - overrides bridge default timeout for that run only
-- `/assist-stream` request body matches `/assist` and responds with NDJSON events:
-  - `run_started`: `{ event, request_id, model, reasoning_effort, timestamp }`
-  - `progress`: `{ event, request_id, stage, message, timestamp }`
-  - `summary`: `{ event, request_id, elapsed_ms, usage, warnings_count }`
-  - `result`: `{ event, request_id, output_text, elapsed_ms, usage, response_id }`
-  - `error`: `{ event, request_id, message, status }`
+  - overrides the bridge default timeout for that run only
+
+`/assist-stream` emits NDJSON events:
+
+- `run_started`
+- `progress`
+- `summary`
+- `result`
+- `error`
 
 ## Packaging
+
 - Build all desktop targets:
   - `npm run dist:desktop`
 - Build one target:
   - `npm run dist:win`
   - `npm run dist:mac`
   - `npm run dist:linux`
-- Windows note:
-  - This project sets `build.win.signAndEditExecutable=false` to avoid Windows symlink-privilege failures when extracting `winCodeSign`.
-  - If you need executable metadata editing/signing behavior, enable Windows Developer Mode (or run elevated) and remove that flag.
+
+Windows note:
+
+- This project sets `build.win.signAndEditExecutable=false` to avoid Windows symlink-privilege failures when extracting `winCodeSign`.
+- If you need executable metadata editing or code signing, enable Windows Developer Mode or run elevated and then remove that flag.

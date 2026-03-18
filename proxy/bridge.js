@@ -7,7 +7,7 @@ const { spawn } = require('child_process');
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
 
-const BRIDGE_VERSION = require('../package.json').version || '0.3.0';
+const BRIDGE_VERSION = require('../package.json').version || '0.3.1';
 
 const ALLOWED_REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh'];
 const ALLOWED_REASONING_EFFORTS_SET = new Set(ALLOWED_REASONING_EFFORTS);
@@ -806,6 +806,23 @@ function safeEmitProgressEvent(onEvent, stage, message) {
   }
 }
 
+function safeEmitRawOutput(onRawOutput, stream, text) {
+  if (typeof onRawOutput !== 'function') {
+    return;
+  }
+  if (stream !== 'stdout' && stream !== 'stderr') {
+    return;
+  }
+  if (typeof text !== 'string' || !text) {
+    return;
+  }
+  try {
+    onRawOutput({ stream, text, ts: Date.now() });
+  } catch (err) {
+    // swallow callback errors so codex execution is not interrupted
+  }
+}
+
 function createClientCancelledError() {
   const error = new Error('request cancelled by client');
   error.status = 499;
@@ -1152,6 +1169,7 @@ async function runCodexStream(
   requestedReasoningEffort,
   timeoutOverrideMs,
   onEvent,
+  onRawOutput,
   abortSignal
 ) {
   if (abortSignal && abortSignal.aborted) {
@@ -1365,12 +1383,16 @@ async function runCodexStream(
     }, 20000);
 
     child.stdout.on('data', (chunk) => {
-      stdoutBuffer += chunk.toString();
+      const text = chunk.toString();
+      safeEmitRawOutput(onRawOutput, 'stdout', text);
+      stdoutBuffer += text;
       stdoutBuffer = processBufferedLines(stdoutBuffer, processStdoutLine, false);
     });
 
     child.stderr.on('data', (chunk) => {
-      stderrBuffer += chunk.toString();
+      const text = chunk.toString();
+      safeEmitRawOutput(onRawOutput, 'stderr', text);
+      stderrBuffer += text;
       stderrBuffer = processBufferedLines(
         stderrBuffer,
         (line) => {
@@ -1542,8 +1564,11 @@ function createProjectSessionManager(config, runtime) {
       last_result: null,
       chat_turns: [],
       session_usage: createEmptySessionUsage(),
+      raw_cli_log: [],
+      raw_cli_entry_seq: 0,
       events: [],
       subscribers: new Map(),
+      active_run_promise: null,
     };
   }
 
@@ -1598,11 +1623,71 @@ function createProjectSessionManager(config, runtime) {
     };
   }
 
-  function notifySessionUpdate(session, eventPayload) {
+  function cloneRawCliEntry(entry) {
+    if (!entry || typeof entry !== 'object') {
+      return null;
+    }
+    const stream =
+      entry.stream === 'stderr' || entry.stream === 'stdout' ? entry.stream : 'stdout';
+    const text = typeof entry.text === 'string' ? entry.text : '';
+    if (!text) {
+      return null;
+    }
+    return {
+      seq: Number.isFinite(Number(entry.seq))
+        ? Math.max(0, Math.floor(Number(entry.seq)))
+        : 0,
+      stream,
+      text,
+      ts: Number.isFinite(Number(entry.ts)) ? Math.max(0, Math.floor(Number(entry.ts))) : Date.now(),
+    };
+  }
+
+  function cloneRawCliLog(rawCliLog) {
+    if (!Array.isArray(rawCliLog)) {
+      return [];
+    }
+    return rawCliLog.map((entry) => cloneRawCliEntry(entry)).filter(Boolean);
+  }
+
+  function buildSessionSummary(session) {
+    return {
+      session_id: session.session_id,
+      project_id: session.project_id,
+      status: session.status,
+      status_message: session.status_message || '',
+      updated_at: session.updated_at,
+      active_run_id: session.active_run_id,
+      session_usage: cloneSessionUsage(session.session_usage),
+      last_seq: session.seq,
+    };
+  }
+
+  function buildDesktopSessionDetail(session) {
+    return {
+      ...buildSessionSnapshot(session),
+      raw_cli_log: cloneRawCliLog(session.raw_cli_log),
+    };
+  }
+
+  function notifySessionUpdate(session, eventPayload, options = {}) {
     try {
       emitter.emit('session:update', {
-        session: buildSessionSnapshot(session),
+        session: buildSessionSummary(session),
         event: eventPayload || null,
+        raw_cli_entry: cloneRawCliEntry(options.rawCliEntry),
+      });
+    } catch (err) {
+      // ignore listener errors so bridge state remains stable
+    }
+  }
+
+  function notifySessionDeleted(session) {
+    try {
+      emitter.emit('session:update', {
+        deleted: true,
+        session_id: session.session_id,
+        project_id: session.project_id,
       });
     } catch (err) {
       // ignore listener errors so bridge state remains stable
@@ -1665,6 +1750,25 @@ function createProjectSessionManager(config, runtime) {
     return eventPayload;
   }
 
+  function appendRawCliOutput(session, rawOutput) {
+    const normalized = cloneRawCliEntry({
+      seq: session.raw_cli_entry_seq + 1,
+      stream: rawOutput && rawOutput.stream,
+      text: rawOutput && rawOutput.text,
+      ts: rawOutput && rawOutput.ts,
+    });
+    if (!normalized) {
+      return null;
+    }
+    session.raw_cli_entry_seq = normalized.seq;
+    session.raw_cli_log.push(normalized);
+    session.updated_at = Date.now();
+    notifySessionUpdate(session, null, {
+      rawCliEntry: normalized,
+    });
+    return normalized;
+  }
+
   function ensureSession(projectId) {
     const normalizedProjectId = typeof projectId === 'string' ? projectId.trim() : '';
     if (!normalizedProjectId) {
@@ -1702,7 +1806,7 @@ function createProjectSessionManager(config, runtime) {
   function listSessions() {
     return [...sessionsByProjectId.values()]
       .sort((a, b) => b.updated_at - a.updated_at)
-      .map((session) => buildSessionSnapshot(session));
+      .map((session) => buildSessionSummary(session));
   }
 
   function createBusyError(session) {
@@ -1803,7 +1907,7 @@ function createProjectSessionManager(config, runtime) {
       user_prompt: request.userPrompt,
     });
 
-    void (async () => {
+    const runPromise = (async () => {
       try {
         const result = await runCodexStream(
           config,
@@ -1836,6 +1940,12 @@ function createProjectSessionManager(config, runtime) {
               stage,
               message,
             });
+          },
+          (rawOutput) => {
+            if (session.active_run_id !== runId) {
+              return;
+            }
+            appendRawCliOutput(session, rawOutput);
           },
           session.active_abort_controller.signal
         );
@@ -1936,10 +2046,12 @@ function createProjectSessionManager(config, runtime) {
         session.active_run_id = null;
         session.active_abort_controller = null;
         session.current_progress_key = '';
+        session.active_run_promise = null;
         session.updated_at = Date.now();
         notifySessionUpdate(session, null);
       }
     })();
+    session.active_run_promise = runPromise;
 
     return {
       session_id: session.session_id,
@@ -1967,6 +2079,48 @@ function createProjectSessionManager(config, runtime) {
     }
     notifySessionUpdate(session, null);
     return buildSessionSnapshot(session);
+  }
+
+  async function deleteSession(sessionId, options = {}) {
+    const session = getSessionById(sessionId);
+    if (!session) {
+      const error = new Error('session not found');
+      error.status = 404;
+      throw error;
+    }
+
+    const cancelActive = options.cancelActive !== false;
+    if (session.active_run_promise) {
+      if (!cancelActive) {
+        const error = new Error('session has an active run');
+        error.status = 409;
+        throw error;
+      }
+      if (session.active_abort_controller) {
+        session.status_message = 'Stopping before delete...';
+        notifySessionUpdate(session, null);
+        try {
+          session.active_abort_controller.abort();
+        } catch (err) {
+          // ignore abort failures; the active run promise will settle state
+        }
+      }
+      try {
+        await session.active_run_promise;
+      } catch (err) {
+        // ignore run failures while deleting the stored session
+      }
+    }
+
+    session.subscribers.clear();
+    sessionsById.delete(session.session_id);
+    sessionsByProjectId.delete(session.project_id);
+    notifySessionDeleted(session);
+    return {
+      deleted: true,
+      session_id: session.session_id,
+      project_id: session.project_id,
+    };
   }
 
   function subscribeToSessionEvents(sessionId, onEvent, afterSeq) {
@@ -2020,8 +2174,10 @@ function createProjectSessionManager(config, runtime) {
     getSessionByProjectId,
     listSessions,
     buildSessionSnapshot,
+    buildDesktopSessionDetail,
     startProjectRun,
     cancelSession,
+    deleteSession,
     subscribeToSessionEvents,
     onUpdate,
   };
@@ -2515,6 +2671,7 @@ function createBridgeApp(config) {
             timestamp: new Date().toISOString(),
           });
         },
+        null,
         abortController.signal
       );
 
