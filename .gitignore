@@ -1,0 +1,11 @@
+node_modules/
+proxy/node_modules/
+
+proxy/.codex-home/
+proxy/.tmp/
+
+dist/*
+!dist/*.exe
+
+Thumbs.db
+.DS_Store

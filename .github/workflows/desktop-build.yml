@@ -1,0 +1,70 @@
+name: Desktop Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Prepare isolated build workspace
+        shell: pwsh
+        run: |
+          $releaseName = "gha-${{ github.run_id }}-${{ github.run_attempt }}"
+          $buildSrc = Join-Path $env:LOCALAPPDATA "Codex_Assist/build-src/$releaseName"
+          $buildOut = Join-Path $env:LOCALAPPDATA "Codex_Assist/build-out/$releaseName"
+          $proxyDir = Join-Path $buildSrc "proxy"
+
+          cmd /c if exist "$buildSrc" rmdir /s /q "$buildSrc"
+          cmd /c if exist "$buildOut" rmdir /s /q "$buildOut"
+
+          New-Item -ItemType Directory -Force -Path $buildSrc, $buildOut, $proxyDir | Out-Null
+          Copy-Item desktop -Destination $buildSrc -Recurse
+          Copy-Item proxy/bridge.js, proxy/server.js, proxy/package.json, proxy/package-lock.json -Destination $proxyDir
+          Copy-Item package.json, package-lock.json, README.md, overleaf-assist-demo.user.js, AGENTS.md -Destination $buildSrc
+
+          "BUILD_SRC=$buildSrc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "BUILD_OUT=$buildOut" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install dependencies
+        shell: pwsh
+        working-directory: ${{ env.BUILD_SRC }}
+        run: npm ci
+
+      - name: Build Windows installer
+        shell: pwsh
+        working-directory: ${{ env.BUILD_SRC }}
+        run: |
+          Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+          npx electron-builder --win nsis --config.npmRebuild=false --config.directories.output="${env:BUILD_OUT}"
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: overleaf-assist-windows-installer
+          path: ${{ env.BUILD_OUT }}/*.exe
+          if-no-files-found: error
+
+      - name: Clean up temp workspace
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:BUILD_SRC) {
+            cmd /c if exist "$env:BUILD_SRC" rmdir /s /q "$env:BUILD_SRC"
+          }
+          if ($env:BUILD_OUT) {
+            cmd /c if exist "$env:BUILD_OUT" rmdir /s /q "$env:BUILD_OUT"
+          }

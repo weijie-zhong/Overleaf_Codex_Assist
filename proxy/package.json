@@ -1,0 +1,14 @@
+{
+  "name": "overleaf-assist-demo-proxy",
+  "version": "0.3.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2"
+  }
+}

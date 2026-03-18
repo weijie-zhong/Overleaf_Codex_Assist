@@ -1,0 +1,64 @@
+{
+  "name": "overleaf-assist-app",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Overleaf Assist desktop bridge and userscript",
+  "main": "desktop/main.js",
+  "scripts": {
+    "start:bridge": "node proxy/server.js",
+    "start:desktop": "node desktop/start.js",
+    "dist:desktop": "electron-builder -mwl",
+    "dist:win": "electron-builder --win nsis",
+    "dist:mac": "electron-builder --mac dmg",
+    "dist:linux": "electron-builder --linux AppImage"
+  },
+  "dependencies": {
+    "@homebridge/node-pty-prebuilt-multiarch": "^0.13.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "cors": "^2.8.5",
+    "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "electron": "^29.4.6",
+    "electron-builder": "^26.8.1"
+  },
+  "build": {
+    "appId": "com.overleaf.assist.bridge",
+    "productName": "Overleaf Assist",
+    "asar": true,
+    "files": [
+      "desktop/**/*",
+      "proxy/bridge.js",
+      "proxy/server.js",
+      "README.md",
+      "overleaf-assist-demo.user.js",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "signAndEditExecutable": false,
+      "icon": "desktop/assets/icon.ico",
+      "artifactName": "Overleaf-Assist-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.productivity"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "icon": "desktop/assets/icon.png",
+      "category": "Utility"
+    }
+  }
+}
